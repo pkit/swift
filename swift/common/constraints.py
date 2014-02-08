@@ -132,7 +132,7 @@ def check_object_creation(req, object_name):
     if req.content_length is None and \
             req.headers.get('transfer-encoding') != 'chunked':
         return HTTPLengthRequired(request=req)
-    if 'X-Copy-From' in req.headers and req.content_length:
+    if ('X-Copy-From' in req.headers or 'X-Copy-From-Account' in req.headers) and req.content_length:
         return HTTPBadRequest(body='Copy requests require a zero byte body',
                               request=req, content_type='text/plain')
     if len(object_name) > MAX_OBJECT_NAME_LENGTH:
@@ -202,6 +202,31 @@ def check_utf8(string):
         return False
 
 
+def check_path_header(req, name, length, error_msg):
+    """
+    Validate that the value of path-like header is
+    well formatted. We assume the caller ensures that
+    specific header is present in req.headers.
+
+    :param req: HTTP request object
+    :param name: header name
+    :param length: length of path segment check
+    :param error_msg: error message for client
+    :returns: A tuple with path parts according to length
+    :raise: HTTPPreconditionFailed if header value
+            is not well formatted.
+    """
+    header = unquote(req.headers.get(name))
+    if not header.startswith('/'):
+        header = '/' + header
+    try:
+        return split_path(header, length, length, True)
+    except ValueError:
+        raise HTTPPreconditionFailed(
+            request=req,
+            body=error_msg)
+
+
 def check_copy_from_header(req):
     """
     Validate that the value from x-copy-from header is
@@ -213,13 +238,54 @@ def check_copy_from_header(req):
     :raise: HTTPPreconditionFailed if x-copy-from value
             is not well formatted.
     """
-    src_header = unquote(req.headers.get('X-Copy-From'))
-    if not src_header.startswith('/'):
-        src_header = '/' + src_header
-    try:
-        return split_path(src_header, 2, 2, True)
-    except ValueError:
-        raise HTTPPreconditionFailed(
-            request=req,
-            body='X-Copy-From header must be of the form'
-                 '<container name>/<object name>')
+    return check_path_header(req, 'X-Copy-From', 2,
+                             'X-Copy-From header must be of the form '
+                             '<container name>/<object name>')
+
+
+def check_copy_from_account_header(req):
+    """
+    Validate that the value from x-copy-from-account header is
+    well formatted. We assume the caller ensures that
+    x-copy-from-account header is present in req.headers.
+
+    :param req: HTTP request object
+    :returns: A tuple with account name, container name and object name
+    :raise: HTTPPreconditionFailed if x-copy-from-account value
+            is not well formatted.
+    """
+    return check_path_header(req, 'X-Copy-From-Account', 3,
+                             'X-Copy-From-Account header must be of the form '
+                             '<account name>/<container name>/<object name>')
+
+
+def check_destination_header(req):
+    """
+    Validate that the value from destination header is
+    well formatted. We assume the caller ensures that
+    destination header is present in req.headers.
+
+    :param req: HTTP request object
+    :returns: A tuple with container name and object name
+    :raise: HTTPPreconditionFailed if destination value
+            is not well formatted.
+    """
+    return check_path_header(req, 'Destination', 2,
+                             'Destination header must be of the form '
+                             '<container name>/<object name>')
+
+
+def check_destination_account_header(req):
+    """
+    Validate that the value from destination-account header is
+    well formatted. We assume the caller ensures that
+    destination-account header is present in req.headers.
+
+    :param req: HTTP request object
+    :returns: A tuple with account name, container name and object name
+    :raise: HTTPPreconditionFailed if destination-account value
+            is not well formatted.
+    """
+    return check_path_header(req, 'Destination-Account', 3,
+                             'Destination-Account header must be of the form '
+                             '<account name>/<container name>/<object name>')

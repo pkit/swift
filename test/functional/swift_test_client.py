@@ -172,7 +172,7 @@ class Connection(object):
         # unicode and this would cause troubles when doing
         # no_safe_quote query.
         self.storage_url = str('/%s/%s' % (x[3], x[4]))
-
+        self.account_name = x[4]
         self.storage_token = storage_token
 
         self.http_connect()
@@ -564,6 +564,24 @@ class File(Base):
 
         if 'Destination' in headers:
             headers['Destination'] = urllib.quote(headers['Destination'])
+
+        return self.conn.make_request('COPY', self.path, hdrs=headers,
+                                      parms=parms) == 201
+
+    def copy_account(self, dest_account, dest_cont, dest_file,
+                     hdrs={}, parms={}, cfg={}):
+        if 'destination-account' in cfg:
+            headers = {'Destination-Account': cfg['destination-account']}
+        elif cfg.get('no_destination'):
+            headers = {}
+        else:
+            headers = {'Destination-Account': '%s/%s/%s' %
+                                              (dest_account, dest_cont, dest_file)}
+        headers.update(hdrs)
+
+        if 'Destination-Account' in headers:
+            headers['Destination-Account'] = \
+                urllib.quote(headers['Destination-Account'])
 
         return self.conn.make_request('COPY', self.path, hdrs=headers,
                                       parms=parms) == 201

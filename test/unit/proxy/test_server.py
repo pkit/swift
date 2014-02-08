@@ -54,7 +54,7 @@ from swift.proxy.controllers.base import get_container_memcache_key, \
     get_account_memcache_key, cors_validation
 import swift.proxy.controllers
 from swift.common.request_helpers import get_sys_meta_prefix
-from swift.common.swob import Request, Response, HTTPUnauthorized
+from swift.common.swob import Request, Response, HTTPUnauthorized, HTTPPreconditionFailed, HTTPException
 
 # mocks
 logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
@@ -160,6 +160,17 @@ def do_setup(the_object_server):
                                                          'x-trans-id': 'test'})
         resp = conn.getresponse()
         assert(resp.status == 201)
+    ts = normalize_timestamp(time.time())
+    partition, nodes = prosrv.account_ring.get_nodes('a1')
+    for node in nodes:
+        conn = swift.proxy.controllers.obj.http_connect(node['ip'],
+                                                        node['port'],
+                                                        node['device'],
+                                                        partition, 'PUT', '/a1',
+                                                        {'X-Timestamp': ts,
+                                                         'x-trans-id': 'test'})
+        resp = conn.getresponse()
+        assert(resp.status == 201)
     # Create container
     sock = connect_tcp(('localhost', prolis.getsockname()[1]))
     fd = sock.makefile()
@@ -169,6 +180,18 @@ def do_setup(the_object_server):
     fd.flush()
     headers = readuntil2crlfs(fd)
     exp = 'HTTP/1.1 201'
+    assert headers[:len(exp)] == exp, "Expected '%s', encountered '%s'" % (
+        exp, headers[:len(exp)])
+    # Create container in other account
+    sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+    fd = sock.makefile()
+    fd.write('PUT /v1/a1/c1 HTTP/1.1\r\nHost: localhost\r\n'
+             'Connection: close\r\nX-Auth-Token: t\r\n'
+             'Content-Length: 0\r\n\r\n')
+    fd.flush()
+    headers = readuntil2crlfs(fd)
+    exp = 'HTTP/1.1 201'
+    print headers
     assert headers[:len(exp)] == exp, "Expected '%s', encountered '%s'" % (
         exp, headers[:len(exp)])
 
@@ -2372,6 +2395,350 @@ class TestObjectController(unittest.TestCase):
             resp = controller.PUT(req)
             self.assertEquals(resp.status_int, 413)
 
+    def test_copy_from_account_same(self):
+        with save_globals():
+            controller = proxy_server.ObjectController(self.app, 'account',
+                                                       'container', 'object')
+            # initial source object PUT
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 201, 201, 201)
+            #                acct cont obj  obj  obj
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+
+            # basic copy
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': 'a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o')
+
+            # non-zero content length
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '5',
+                                         'X-Copy-From-Account': 'a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 200, 200)
+            #                acct cont acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 400)
+
+            # extra source path parsing
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': 'a/c/o/o2'})
+            req.account = 'a'
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o/o2')
+
+            # space in soure path
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': 'a/c/o%20o2'})
+            req.account = 'a'
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o%20o2')
+
+            # repeat tests with leading /
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o')
+
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o/o2'})
+            req.account = 'a'
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o/o2')
+
+            # negative tests
+
+            # invalid x-copy-from-account path
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a'})
+            self.app.update_request(req)
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int // 100, 4)  # client error
+
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c'})
+            self.app.update_request(req)
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int // 100, 4)  # client error
+
+            # server error
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 503, 503, 503)
+            #                acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 503)
+
+            # not found
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 404, 404, 404)
+            #                acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 404)
+
+            # some missing containers
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 404, 404, 200, 201, 201, 201)
+            #                acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+
+            # test object meta data
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o',
+                                         'X-Object-Meta-Ours': 'okay'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers.get('x-object-meta-test'),
+                              'testing')
+            self.assertEquals(resp.headers.get('x-object-meta-ours'), 'okay')
+            self.assertEquals(resp.headers.get('x-delete-at'), '9876543210')
+
+            # copy-from object is too large to fit in target object
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+
+            class LargeResponseBody(object):
+
+                def __len__(self):
+                    return MAX_FILE_SIZE + 1
+
+                def __getitem__(self, key):
+                    return ''
+
+            copy_from_obj_body = LargeResponseBody()
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201,
+                             body=copy_from_obj_body)
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 413)
+
+    def test_copy_from_account_different(self):
+        with save_globals():
+            controller = proxy_server.ObjectController(self.app, 'account',
+                                                       'container', 'object')
+            # initial source object PUT
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 201, 201, 201)
+            #                acct cont obj  obj  obj
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+
+            # basic copy
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': 'a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o')
+
+            # non-zero content length
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '5',
+                                         'X-Copy-From-Account': 'a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 200, 200)
+            #                acct cont acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 400)
+
+            # extra source path parsing
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': 'a/c/o/o2'})
+            req.account = 'a'
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o/o2')
+
+            # space in soure path
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': 'a/c/o%20o2'})
+            req.account = 'a'
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o%20o2')
+
+            # repeat tests with leading /
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o')
+
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o/o2'})
+            req.account = 'a'
+            set_http_connect(200, 200, 200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o/o2')
+
+            # negative tests
+
+            # invalid x-copy-from-account path
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a'})
+            self.app.update_request(req)
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int // 100, 4)  # client error
+
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c'})
+            self.app.update_request(req)
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int // 100, 4)  # client error
+
+            # server error
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 503, 503, 503)
+            #                acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 503)
+
+            # not found
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 404, 404, 404)
+            #                acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 404)
+
+            # some missing containers
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 404, 404, 200, 201, 201, 201)
+            #                acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+
+            # test object meta data
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o',
+                                         'X-Object-Meta-Ours': 'okay'})
+            self.app.update_request(req)
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers.get('x-object-meta-test'),
+                              'testing')
+            self.assertEquals(resp.headers.get('x-object-meta-ours'), 'okay')
+            self.assertEquals(resp.headers.get('x-delete-at'), '9876543210')
+
+            # copy-from object is too large to fit in target object
+            req = Request.blank('/v1/a1/c1/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0',
+                                         'X-Copy-From-Account': '/a/c/o'})
+            self.app.update_request(req)
+
+            class LargeResponseBody(object):
+
+                def __len__(self):
+                    return MAX_FILE_SIZE + 1
+
+                def __getitem__(self, key):
+                    return ''
+
+            copy_from_obj_body = LargeResponseBody()
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201,
+                             body=copy_from_obj_body)
+            self.app.memcache.store = {}
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 413)
+
     def test_COPY(self):
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
@@ -2438,8 +2805,8 @@ class TestObjectController(unittest.TestCase):
             set_http_connect(200, 200)
             #                acct cont
             self.app.memcache.store = {}
-            resp = controller.COPY(req)
-            self.assertEquals(resp.status_int, 412)
+            self.assertRaisesRegexp(HTTPException, '412 Precondition Failed',
+                                    controller.COPY, req)
 
             req = Request.blank('/v1/a/c/o',
                                 environ={'REQUEST_METHOD': 'COPY'},
@@ -2510,12 +2877,168 @@ class TestObjectController(unittest.TestCase):
             resp = controller.COPY(req)
             self.assertEquals(resp.status_int, 413)
 
+    def test_COPY_account(self):
+        with save_globals():
+            controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
+            req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                                headers={'Content-Length': '0'})
+            req.account = 'a'
+            set_http_connect(200, 200, 201, 201, 201)
+            #                acct cont obj  obj  obj
+            resp = controller.PUT(req)
+            self.assertEquals(resp.status_int, 201)
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': 'a/c/o'})
+            req.account = 'a'
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201, 200, 200)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o')
+
+            req = Request.blank('/v1/a/c/o/o2',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': 'a/c/o'})
+            req.account = 'a'
+            controller.object_name = 'o/o2'
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201, 200, 200)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o/o2')
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
+            req.account = 'a'
+            controller.object_name = 'o'
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201, 200, 200)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o')
+
+            req = Request.blank('/v1/a/c/o/o2',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
+            req.account = 'a'
+            controller.object_name = 'o/o2'
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201, 200, 200)
+            #                acct cont acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-account'], 'a/c/o/o2')
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': 'a/c_o'})
+            req.account = 'a'
+            controller.object_name = 'o'
+            set_http_connect(200, 200)
+            #                acct cont
+            self.app.memcache.store = {}
+            self.assertRaisesRegexp(HTTPException, '412 Precondition Failed',
+                                    controller.COPY, req)
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
+            req.account = 'a'
+            controller.object_name = 'o'
+            set_http_connect(200, 200, 503, 503, 503)
+            #                acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 503)
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
+            req.account = 'a'
+            controller.object_name = 'o'
+            set_http_connect(200, 200, 404, 404, 404)
+            #                acct cont objc objc objc
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 404)
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
+            req.account = 'a'
+            controller.object_name = 'o'
+            set_http_connect(200, 200, 404, 404, 200, 201, 201, 201)
+            #                acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 201)
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o',
+                                         'X-Object-Meta-Ours': 'okay'})
+            req.account = 'a'
+            controller.object_name = 'o'
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201)
+            #                acct cont objc objc objc obj  obj  obj
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers.get('x-object-meta-test'),
+                              'testing')
+            self.assertEquals(resp.headers.get('x-object-meta-ours'), 'okay')
+            self.assertEquals(resp.headers.get('x-delete-at'), '9876543210')
+
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
+            self.app.update_request(req)
+
+            class LargeResponseBody(object):
+
+                def __len__(self):
+                    return MAX_FILE_SIZE + 1
+
+                def __getitem__(self, key):
+                    return ''
+
+            copy_from_obj_body = LargeResponseBody()
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201,
+                             body=copy_from_obj_body)
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 413)
+
     def test_COPY_newest(self):
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
             req = Request.blank('/v1/a/c/o',
                                 environ={'REQUEST_METHOD': 'COPY'},
                                 headers={'Destination': '/c/o'})
+            req.account = 'a'
+            controller.object_name = 'o'
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201,
+                             #act cont objc objc objc obj  obj  obj
+                             timestamps=('1', '1', '1', '3', '2', '4', '4',
+                                         '4'))
+            self.app.memcache.store = {}
+            resp = controller.COPY(req)
+            self.assertEquals(resp.status_int, 201)
+            self.assertEquals(resp.headers['x-copied-from-last-modified'],
+                              '3')
+
+    def test_COPY_account_newest(self):
+        with save_globals():
+            controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
             req.account = 'a'
             controller.object_name = 'o'
             set_http_connect(200, 200, 200, 200, 200, 201, 201, 201,
@@ -2544,6 +3067,31 @@ class TestObjectController(unittest.TestCase):
             req = Request.blank('/v1/a/c/o',
                                 environ={'REQUEST_METHOD': 'COPY'},
                                 headers={'Destination': '/c/o'})
+
+            self.app.update_request(req)
+            controller.COPY(req)
+            self.assertEquals(given_headers.get('X-Delete-At'), '9876543210')
+            self.assertTrue('X-Delete-At-Host' in given_headers)
+            self.assertTrue('X-Delete-At-Device' in given_headers)
+            self.assertTrue('X-Delete-At-Partition' in given_headers)
+            self.assertTrue('X-Delete-At-Container' in given_headers)
+
+    def test_COPY_account_delete_at(self):
+        with save_globals():
+            given_headers = {}
+
+            def fake_connect_put_node(nodes, part, path, headers,
+                                      logger_thread_locals):
+                given_headers.update(headers)
+
+            controller = proxy_server.ObjectController(self.app, 'a',
+                                                       'c', 'o')
+            controller._connect_put_node = fake_connect_put_node
+            set_http_connect(200, 200, 200, 200, 200, 201, 201, 201)
+            self.app.memcache.store = {}
+            req = Request.blank('/v1/a/c/o',
+                                environ={'REQUEST_METHOD': 'COPY'},
+                                headers={'Destination-Account': '/a/c/o'})
 
             self.app.update_request(req)
             controller.COPY(req)

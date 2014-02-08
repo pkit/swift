@@ -40,7 +40,8 @@ from swift.common.utils import ContextPool, normalize_timestamp, \
     quorum_size, GreenAsyncPile, normalize_delete_at_timestamp
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_metadata, check_object_creation, \
-    MAX_FILE_SIZE, check_copy_from_header
+    MAX_FILE_SIZE, check_copy_from_header, check_destination_account_header, \
+    check_destination_header, check_copy_from_account_header
 from swift.common.exceptions import ChunkReadTimeout, \
     ChunkWriteTimeout, ConnectionTimeout, ListingIterNotFound, \
     ListingIterNotAuthorized, ListingIterError
@@ -547,25 +548,37 @@ class ObjectController(Controller):
 
         reader = req.environ['wsgi.input'].read
         data_source = iter(lambda: reader(self.app.client_chunk_size), '')
+        long_source = False
         source_header = req.headers.get('X-Copy-From')
+        if not source_header:
+            source_header = req.headers.get('X-Copy-From-Account')
+            if source_header:
+                long_source = True
         source_resp = None
         if source_header:
             if req.environ.get('swift.orig_req_method', req.method) != 'POST':
                 req.environ.setdefault('swift.log_info', []).append(
                     'x-copy-from:%s' % source_header)
-            src_container_name, src_obj_name = check_copy_from_header(req)
             ver, acct, _rest = req.split_path(2, 3, True)
-            if isinstance(acct, unicode):
-                acct = acct.encode('utf-8')
-            source_header = '/%s/%s/%s/%s' % (ver, acct,
+            if long_source:
+                src_account_name, src_container_name, src_obj_name = \
+                    check_copy_from_account_header(req)
+            else:
+                src_container_name, src_obj_name = check_copy_from_header(req)
+                if isinstance(acct, unicode):
+                    acct = acct.encode('utf-8')
+                src_account_name = acct
+            source_header = '/%s/%s/%s/%s' % (ver, src_account_name,
                                               src_container_name, src_obj_name)
             source_req = req.copy_get()
             source_req.path_info = source_header
             source_req.headers['X-Newest'] = 'true'
             orig_obj_name = self.object_name
             orig_container_name = self.container_name
+            orig_account_name = self.account_name
             self.object_name = src_obj_name
             self.container_name = src_container_name
+            self.account_name = src_account_name
             # This gives middlewares a way to change the source; for example,
             # this lets you COPY a SLO manifest and have the new object be the
             # concatenation of the segments (like what a GET request gives
@@ -577,6 +590,7 @@ class ObjectController(Controller):
                 return source_resp
             self.object_name = orig_obj_name
             self.container_name = orig_container_name
+            self.account_name = orig_account_name
             new_req = Request.blank(req.path_info,
                                     environ=req.environ, headers=req.headers)
             data_source = iter(source_resp.app_iter)
@@ -590,8 +604,11 @@ class ObjectController(Controller):
             if new_req.content_length > MAX_FILE_SIZE:
                 return HTTPRequestEntityTooLarge(request=req)
             new_req.etag = source_resp.etag
-            # we no longer need the X-Copy-From header
-            del new_req.headers['X-Copy-From']
+            # we no longer need the X-Copy-From-* headers
+            if long_source:
+                del new_req.headers['X-Copy-From-Account']
+            else:
+                del new_req.headers['X-Copy-From']
             if not content_type_manually_set:
                 new_req.headers['Content-Type'] = \
                     source_resp.headers['Content-Type']
@@ -719,8 +736,12 @@ class ObjectController(Controller):
         resp = self.best_response(req, statuses, reasons, bodies,
                                   _('Object PUT'), etag=etag)
         if source_header:
-            resp.headers['X-Copied-From'] = quote(
-                source_header.split('/', 3)[3])
+            if long_source:
+                resp.headers['X-Copied-From-Account'] = quote(
+                    source_header.split('/', 2)[2])
+            else:
+                resp.headers['X-Copied-From'] = quote(
+                    source_header.split('/', 3)[3])
             if 'last-modified' in source_resp.headers:
                 resp.headers['X-Copied-From-Last-Modified'] = \
                     source_resp.headers['last-modified']
@@ -830,27 +851,32 @@ class ObjectController(Controller):
     def COPY(self, req):
         """HTTP COPY request handler."""
         dest = req.headers.get('Destination')
+        long_source = False
+        if not dest:
+            dest = req.headers.get('Destination-Account')
+            long_source = True
         if not dest:
             return HTTPPreconditionFailed(request=req,
                                           body='Destination header required')
-        dest = unquote(dest)
-        if not dest.startswith('/'):
-            dest = '/' + dest
-        try:
-            _junk, dest_container, dest_object = dest.split('/', 2)
-        except ValueError:
-            return HTTPPreconditionFailed(
-                request=req,
-                body='Destination header must be of the form '
-                     '<container name>/<object name>')
-        source = '/' + self.container_name + '/' + self.object_name
+        if long_source:
+            dest_account, dest_container, dest_object = check_destination_account_header(req)
+            source = '/%s/%s/%s' % (self.account_name, self.container_name, self.object_name)
+        else:
+            dest_container, dest_object = check_destination_header(req)
+            source = '/%s/%s' % (self.container_name, self.object_name)
+            dest_account = self.account_name
+        self.account_name = dest_account
         self.container_name = dest_container
         self.object_name = dest_object
         # re-write the existing request as a PUT instead of creating a new one
         # since this one is already attached to the posthooklogger
         req.method = 'PUT'
-        req.path_info = '/v1/' + self.account_name + dest
+        req.path_info = '/v1/%s/%s/%s' % (dest_account, dest_container, dest_object)
         req.headers['Content-Length'] = 0
-        req.headers['X-Copy-From'] = quote(source)
-        del req.headers['Destination']
+        if long_source:
+            req.headers['X-Copy-From-Account'] = quote(source)
+            del req.headers['Destination-Account']
+        else:
+            req.headers['X-Copy-From'] = quote(source)
+            del req.headers['Destination']
         return self.PUT(req)

@@ -13,6 +13,7 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from copy import deepcopy
 
 from datetime import datetime
 import hashlib
@@ -864,10 +865,17 @@ class TestFileEnv(object):
         cls.account = Account(cls.conn, config.get('account',
                                                    config['username']))
         cls.account.delete_containers()
-
         cls.container = cls.account.container(Utils.create_name())
         if not cls.container.create():
             raise ResponseError(cls.conn.response)
+        config2 = deepcopy(config)
+        config2['account'] = config['account2']
+        config2['username'] = config['username2']
+        config2['password'] = config['password2']
+        cls.conn2 = Connection(config2)
+        cls.conn2.authenticate()
+        cls.account2 = cls.conn2.get_account()
+        cls.account2.delete_containers()
 
         cls.file_size = 128
 
@@ -917,6 +925,60 @@ class TestFile(Base):
                 self.assert_(file_item.initialize())
                 self.assert_(metadata == file_item.metadata)
 
+    def testCopyAccount(self):
+        # makes sure to test encoded characters
+        source_filename = 'dealde%2Fl04 011e%204c8df/flash.png'
+        file_item = self.env.container.file(source_filename)
+
+        metadata = {}
+        for i in range(1):
+            metadata[Utils.create_ascii_name()] = Utils.create_name()
+
+        data = file_item.write_random()
+        file_item.sync_metadata(metadata)
+
+        dest_cont = self.env.account.container(Utils.create_name())
+        self.assert_(dest_cont.create())
+
+        acct = self.env.conn.account_name
+        # copy both from within and across containers
+        for cont in (self.env.container, dest_cont):
+            # copy both with and without initial slash
+            for prefix in ('', '/'):
+                dest_filename = Utils.create_name()
+
+                file_item = self.env.container.file(source_filename)
+                file_item.copy_account('%s%s' % (prefix, acct),
+                                       cont, dest_filename)
+
+                self.assert_(dest_filename in cont.files())
+
+                file_item = cont.file(dest_filename)
+
+                self.assert_(data == file_item.read())
+                self.assert_(file_item.initialize())
+                self.assert_(metadata == file_item.metadata)
+
+        dest_cont = self.env.account2.container(Utils.create_name())
+        self.assert_(dest_cont.create())
+
+        acct = self.env.conn2.account_name
+        # copy both with and without initial slash
+        for prefix in ('', '/'):
+            dest_filename = Utils.create_name()
+
+            file_item = self.env.container.file(source_filename)
+            file_item.copy_account('%s%s' % (prefix, acct),
+                                   dest_cont, dest_filename)
+
+            self.assert_(dest_filename in dest_cont.files())
+
+            file_item = dest_cont.file(dest_filename)
+
+            self.assert_(data == file_item.read())
+            self.assert_(file_item.initialize())
+            self.assert_(metadata == file_item.metadata)
+
     def testCopy404s(self):
         source_filename = Utils.create_name()
         file_item = self.env.container.file(source_filename)
@@ -955,6 +1017,51 @@ class TestFile(Base):
                 '%s%s' % (prefix, Utils.create_name()),
                 Utils.create_name()))
 
+    def testCopyAccount404s(self):
+        acct = self.env.conn.account_name
+        acct2 = self.env.conn2.account_name
+        source_filename = Utils.create_name()
+        file_item = self.env.container.file(source_filename)
+        file_item.write_random()
+
+        dest_cont = self.env.account.container(Utils.create_name())
+        self.assert_(dest_cont.create())
+        dest_cont2 = self.env.account2.container(Utils.create_name())
+        self.assert_(dest_cont2.create())
+
+        for acct, cont in ((acct, dest_cont), (acct2, dest_cont2)):
+            for prefix in ('', '/'):
+                # invalid source container
+                source_cont = self.env.account.container(Utils.create_name())
+                file_item = source_cont.file(source_filename)
+                self.assert_(not file_item.copy_account(
+                    '%s%s' % (prefix, acct), self.env.container,
+                    Utils.create_name()))
+                self.assert_status(404)
+
+                self.assert_(not file_item.copy_account(
+                    '%s%s' % (prefix, acct), cont,
+                    Utils.create_name()))
+                self.assert_status(404)
+
+                # invalid source object
+                file_item = self.env.container.file(Utils.create_name())
+                self.assert_(not file_item.copy_account(
+                    '%s%s' % (prefix, acct), self.env.container,
+                    Utils.create_name()))
+                self.assert_status(404)
+
+                self.assert_(not file_item.copy_account(
+                    '%s%s' % (prefix, acct), cont,
+                    Utils.create_name()))
+                self.assert_status(404)
+
+                # invalid destination container
+                file_item = self.env.container.file(source_filename)
+                self.assert_(not file_item.copy_account(
+                    '%s%s' % (prefix, acct), Utils.create_name(),
+                    Utils.create_name()))
+
     def testCopyNoDestinationHeader(self):
         source_filename = Utils.create_name()
         file_item = self.env.container.file(source_filename)
@@ -975,6 +1082,28 @@ class TestFile(Base):
         self.assert_(not file_item.copy(Utils.create_name(),
                      Utils.create_name(),
                      cfg={'destination': Utils.create_name()}))
+        self.assert_status(412)
+
+    def testCopyDestinationAccountSlashProblems(self):
+        source_filename = Utils.create_name()
+        file_item = self.env.container.file(source_filename)
+        file_item.write_random()
+
+        # no slash
+        self.assert_(not file_item.copy_account(
+            Utils.create_name(),
+            Utils.create_name(),
+            Utils.create_name(),
+            cfg={'destination-account': Utils.create_name()}))
+        self.assert_status(412)
+        # one slash
+        self.assert_(not file_item.copy_account(
+            Utils.create_name(),
+            Utils.create_name(),
+            Utils.create_name(),
+            cfg={'destination-account': '%s/%s' %
+                                        (Utils.create_name(),
+                                         Utils.create_name())}))
         self.assert_status(412)
 
     def testCopyFromHeader(self):
@@ -1000,6 +1129,40 @@ class TestFile(Base):
                 file_item = cont.file(dest_filename)
                 file_item.write(hdrs={'X-Copy-From': '%s%s/%s' % (
                     prefix, self.env.container.name, source_filename)})
+
+                self.assert_(dest_filename in cont.files())
+
+                file_item = cont.file(dest_filename)
+
+                self.assert_(data == file_item.read())
+                self.assert_(file_item.initialize())
+                self.assert_(metadata == file_item.metadata)
+
+    def testCopyFromAccountHeader(self):
+        acct = self.env.conn.account_name
+        source_filename = Utils.create_name()
+        file_item = self.env.container.file(source_filename)
+
+        metadata = {}
+        for i in range(1):
+            metadata[Utils.create_ascii_name()] = Utils.create_name()
+        file_item.metadata = metadata
+
+        data = file_item.write_random()
+
+        dest_cont = self.env.account.container(Utils.create_name())
+        self.assert_(dest_cont.create())
+        dest_cont2 = self.env.account2.container(Utils.create_name())
+        self.assert_(dest_cont2.create())
+
+        for cont in (self.env.container, dest_cont, dest_cont2):
+            # copy both with and without initial slash
+            for prefix in ('', '/'):
+                dest_filename = Utils.create_name()
+
+                file_item = cont.file(dest_filename)
+                file_item.write(hdrs={'X-Copy-From-Account': '%s%s/%s/%s' % (
+                    prefix, acct, self.env.container.name, source_filename)})
 
                 self.assert_(dest_filename in cont.files())
 
@@ -1037,6 +1200,38 @@ class TestFile(Base):
             self.assertRaises(ResponseError, file_item.write,
                               hdrs={'X-Copy-From': '%s%s/%s' %
                               (prefix,
+                               self.env.container.name, source_filename)})
+            self.assert_status(404)
+
+    def testCopyFromAccountHeader404s(self):
+        acct = self.env.conn.account_name
+        source_filename = Utils.create_name()
+        file_item = self.env.container.file(source_filename)
+        file_item.write_random()
+
+        for prefix in ('', '/'):
+            # invalid source container
+            file_item = self.env.container.file(Utils.create_name())
+            self.assertRaises(ResponseError, file_item.write,
+                              hdrs={'X-Copy-From-Account': '%s%s/%s/%s' %
+                              (prefix, acct,
+                               Utils.create_name(), source_filename)})
+            self.assert_status(404)
+
+            # invalid source object
+            file_item = self.env.container.file(Utils.create_name())
+            self.assertRaises(ResponseError, file_item.write,
+                              hdrs={'X-Copy-From-Account': '%s%s/%s/%s' %
+                              (prefix, acct,
+                               self.env.container.name, Utils.create_name())})
+            self.assert_status(404)
+
+            # invalid destination container
+            dest_cont = self.env.account.container(Utils.create_name())
+            file_item = dest_cont.file(Utils.create_name())
+            self.assertRaises(ResponseError, file_item.write,
+                              hdrs={'X-Copy-From-Account': '%s%s/%s/%s' %
+                              (prefix, acct,
                                self.env.container.name, source_filename)})
             self.assert_status(404)
 
@@ -1545,9 +1740,19 @@ class TestDloEnv(object):
     def setUp(cls):
         cls.conn = Connection(config)
         cls.conn.authenticate()
+
         cls.account = Account(cls.conn, config.get('account',
                                                    config['username']))
         cls.account.delete_containers()
+
+        config2 = deepcopy(config)
+        config2['account'] = config['account2']
+        config2['username'] = config['username2']
+        config2['password'] = config['password2']
+        cls.conn2 = Connection(config2)
+        cls.conn2.authenticate()
+        cls.account2 = cls.conn2.get_account()
+        cls.account2.delete_containers()
 
         cls.container = cls.account.container(Utils.create_name())
 
@@ -1635,6 +1840,29 @@ class TestDlo(Base):
         try:
             man1_item = self.env.container.file('man1')
             man1_item.copy(self.env.container.name, "copied-man1")
+        finally:
+            # try not to leave this around for other tests to stumble over
+            f_segment.delete()
+
+        file_item = self.env.container.file('copied-man1')
+        file_contents = file_item.read()
+        self.assertEqual(
+            file_contents,
+            "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffff")
+
+    def test_copy_account(self):
+        # dlo use same account and same container only
+        acct = self.env.conn.account_name
+        # Adding a new segment, copying the manifest, and then deleting the
+        # segment proves that the new object is really the concatenated
+        # segments and not just a manifest.
+        f_segment = self.env.container.file("%s/seg_lowerf" %
+                                            (self.env.segment_prefix))
+        f_segment.write('ffffffffff')
+        try:
+            man1_item = self.env.container.file('man1')
+            man1_item.copy_account(acct, self.env.container.name,
+                                   "copied-man1")
         finally:
             # try not to leave this around for other tests to stumble over
             f_segment.delete()
@@ -1772,6 +2000,14 @@ class TestSloEnv(object):
     def setUp(cls):
         cls.conn = Connection(config)
         cls.conn.authenticate()
+        config2 = deepcopy(config)
+        config2['account'] = config['account2']
+        config2['username'] = config['username2']
+        config2['password'] = config['password2']
+        cls.conn2 = Connection(config2)
+        cls.conn2.authenticate()
+        cls.account2 = cls.conn2.get_account()
+        cls.account2.delete_containers()
 
         if cls.slo_enabled is None:
             status = cls.conn.make_request('GET', '/info',
@@ -1966,12 +2202,65 @@ class TestSlo(Base):
         copied_contents = copied.read(parms={'multipart-manifest': 'get'})
         self.assertEqual(4 * 1024 * 1024 + 1, len(copied_contents))
 
+    def test_slo_copy_account(self):
+        acct = self.env.conn.account_name
+        # same account copy
+        file_item = self.env.container.file("manifest-abcde")
+        file_item.copy_account(acct, self.env.container.name, "copied-abcde")
+
+        copied = self.env.container.file("copied-abcde")
+        copied_contents = copied.read(parms={'multipart-manifest': 'get'})
+        self.assertEqual(4 * 1024 * 1024 + 1, len(copied_contents))
+
+        # copy to different account
+        acct = self.env.conn2.account_name
+        dest_cont = self.env.account2.container(Utils.create_name())
+        self.assert_(dest_cont.create())
+        file_item = self.env.container.file("manifest-abcde")
+        file_item.copy_account(acct, dest_cont, "copied-abcde")
+
+        copied = dest_cont.file("copied-abcde")
+        copied_contents = copied.read(parms={'multipart-manifest': 'get'})
+        self.assertEqual(4 * 1024 * 1024 + 1, len(copied_contents))
+
     def test_slo_copy_the_manifest(self):
         file_item = self.env.container.file("manifest-abcde")
         file_item.copy(self.env.container.name, "copied-abcde-manifest-only",
                        parms={'multipart-manifest': 'get'})
 
         copied = self.env.container.file("copied-abcde-manifest-only")
+        copied_contents = copied.read(parms={'multipart-manifest': 'get'})
+        try:
+            json.loads(copied_contents)
+        except ValueError:
+            self.fail("COPY didn't copy the manifest (invalid json on GET)")
+
+    def test_slo_copy_the_manifest_account(self):
+        acct = self.env.conn.account_name
+        # same account
+        file_item = self.env.container.file("manifest-abcde")
+        file_item.copy_account(acct,
+                               self.env.container.name,
+                               "copied-abcde-manifest-only",
+                               parms={'multipart-manifest': 'get'})
+
+        copied = self.env.container.file("copied-abcde-manifest-only")
+        copied_contents = copied.read(parms={'multipart-manifest': 'get'})
+        try:
+            json.loads(copied_contents)
+        except ValueError:
+            self.fail("COPY didn't copy the manifest (invalid json on GET)")
+
+        # different account
+        acct = self.env.conn2.account_name
+        dest_cont = self.env.account2.container(Utils.create_name())
+        self.assert_(dest_cont.create())
+        file_item.copy_account(acct,
+                               dest_cont,
+                               "copied-abcde-manifest-only",
+                               parms={'multipart-manifest': 'get'})
+
+        copied = dest_cont.file("copied-abcde-manifest-only")
         copied_contents = copied.read(parms={'multipart-manifest': 'get'})
         try:
             json.loads(copied_contents)
