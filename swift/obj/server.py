@@ -461,13 +461,16 @@ class ObjectController(object):
                 self.delete_at_update(
                     'DELETE', orig_delete_at, account, container, obj,
                     request, device)
+        headers = HeaderKeyDict({
+            'x-size': metadata['Content-Length'],
+            'x-content-type': metadata['Content-Type'],
+            'x-timestamp': metadata['X-Timestamp'],
+            'x-etag': metadata['ETag']})
+        headers.update(val for val in metadata.iteritems()
+                       if is_user_meta('object', val[0]))
         self.container_update(
             'PUT', account, container, obj, request,
-            HeaderKeyDict({
-                'x-size': metadata['Content-Length'],
-                'x-content-type': metadata['Content-Type'],
-                'x-timestamp': metadata['X-Timestamp'],
-                'x-etag': metadata['ETag']}),
+            headers,
             device)
         return HTTPCreated(request=request, etag=etag)
 

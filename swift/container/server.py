@@ -24,10 +24,10 @@ from eventlet import Timeout
 
 import swift.common.db
 from swift.container.backend import ContainerBroker, DATADIR
-from swift.common.db import DatabaseAlreadyExists
+from swift.common.db import DatabaseAlreadyExists, utf8encodekeys
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.request_helpers import get_param, get_listing_content_type, \
-    split_and_validate_path, is_sys_or_user_meta
+    split_and_validate_path, is_sys_or_user_meta, is_user_meta
 from swift.common.utils import get_logger, hash_path, public, \
     normalize_timestamp, storage_directory, validate_sync_to, \
     config_true_value, json, timing_stats, replication, \
@@ -268,9 +268,11 @@ class ContainerController(object):
                     pass
             if not os.path.exists(broker.db_file):
                 return HTTPNotFound()
+            metadata = dict([val for val in req.headers.iteritems()
+                             if is_user_meta('object', val[0])])
             broker.put_object(obj, timestamp, int(req.headers['x-size']),
                               req.headers['x-content-type'],
-                              req.headers['x-etag'])
+                              req.headers['x-etag'], json.dumps(metadata))
             return HTTPCreated(request=req)
         else:   # put container
             created = self._update_or_create(req, broker, timestamp)
@@ -335,11 +337,13 @@ class ContainerController(object):
         :params record: object entry record
         :returns: modified record
         """
-        (name, created, size, content_type, etag) = record
+        (name, created, size, content_type, etag, metadata) = record
+        metadata = json.loads(metadata)
+        utf8encodekeys(metadata)
         if content_type is None:
             return {'subdir': name}
         response = {'bytes': size, 'hash': etag, 'name': name,
-                    'content_type': content_type}
+                    'content_type': content_type, 'metadata': metadata}
         last_modified = datetime.utcfromtimestamp(float(created)).isoformat()
         # python isoformat() doesn't include msecs when zero
         if len(last_modified) < len("1970-01-01T00:00:00.000000"):
@@ -412,8 +416,9 @@ class ContainerController(object):
                         SubElement(obj_element, field).text = str(
                             record.pop(field)).decode('utf-8')
                     for field in sorted(record):
-                        SubElement(obj_element, field).text = str(
-                            record[field]).decode('utf-8')
+                        if field != 'metadata':
+                            SubElement(obj_element, field).text = str(
+                                record[field]).decode('utf-8')
             ret.body = tostring(doc, encoding='UTF-8').replace(
                 "<?xml version='1.0' encoding='UTF-8'?>",
                 '<?xml version="1.0" encoding="UTF-8"?>', 1)

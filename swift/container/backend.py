@@ -65,6 +65,7 @@ class ContainerBroker(DatabaseBroker):
                 size INTEGER,
                 content_type TEXT,
                 etag TEXT,
+                metadata TEXT default '',
                 deleted INTEGER DEFAULT 0
             );
 
@@ -165,13 +166,14 @@ class ContainerBroker(DatabaseBroker):
 
     def _commit_puts_load(self, item_list, entry):
         """See :func:`swift.common.db.DatabaseBroker._commit_puts_load`"""
-        (name, timestamp, size, content_type, etag, deleted) = \
+        (name, timestamp, size, content_type, etag, metadata, deleted) = \
             pickle.loads(entry.decode('base64'))
         item_list.append({'name': name,
                           'created_at': timestamp,
                           'size': size,
                           'content_type': content_type,
                           'etag': etag,
+                          'metadata': metadata,
                           'deleted': deleted})
 
     def empty(self):
@@ -193,9 +195,11 @@ class ContainerBroker(DatabaseBroker):
         :param name: object name to be deleted
         :param timestamp: timestamp when the object was marked as deleted
         """
-        self.put_object(name, timestamp, 0, 'application/deleted', 'noetag', 1)
+        self.put_object(name, timestamp, 0, 'application/deleted', 'noetag',
+                        '{}', 1)
 
-    def put_object(self, name, timestamp, size, content_type, etag, deleted=0):
+    def put_object(self, name, timestamp, size, content_type, etag, metadata,
+                   deleted=0):
         """
         Creates an object in the DB with its metadata.
 
@@ -209,7 +213,7 @@ class ContainerBroker(DatabaseBroker):
         """
         record = {'name': name, 'created_at': timestamp, 'size': size,
                   'content_type': content_type, 'etag': etag,
-                  'deleted': deleted}
+                  'metadata': metadata, 'deleted': deleted}
         if self.db_file == ':memory:':
             self.merge_items([record])
             return
@@ -231,7 +235,8 @@ class ContainerBroker(DatabaseBroker):
                     # delimiter
                     fp.write(':')
                     fp.write(pickle.dumps(
-                        (name, timestamp, size, content_type, etag, deleted),
+                        (name, timestamp, size, content_type, etag, metadata,
+                         deleted),
                         protocol=PICKLE_PROTOCOL).encode('base64'))
                     fp.flush()
 
@@ -388,8 +393,8 @@ class ContainerBroker(DatabaseBroker):
         with self.get() as conn:
             results = []
             while len(results) < limit:
-                query = '''SELECT name, created_at, size, content_type, etag
-                           FROM object WHERE'''
+                query = '''SELECT name, created_at, size, content_type, etag,
+                           metadata FROM object WHERE'''
                 query_args = []
                 if end_marker:
                     query += ' name < ? AND'
@@ -450,7 +455,7 @@ class ContainerBroker(DatabaseBroker):
                         delim_force_gte = True
                         dir_name = name[:end + 1]
                         if dir_name != orig_marker:
-                            results.append([dir_name, '0', 0, None, ''])
+                            results.append([dir_name, '0', 0, None, '', '{}'])
                         curs.close()
                         break
                     results.append(row)
@@ -482,10 +487,11 @@ class ContainerBroker(DatabaseBroker):
                 if not conn.execute(query, (rec['name'],)).fetchall():
                     conn.execute('''
                         INSERT INTO object (name, created_at, size,
-                            content_type, etag, deleted)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                            content_type, etag, metadata, deleted)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                     ''', ([rec['name'], rec['created_at'], rec['size'],
-                          rec['content_type'], rec['etag'], rec['deleted']]))
+                          rec['content_type'], rec['etag'], rec['metadata'],
+                          rec['deleted']]))
                 if source:
                     max_rowid = max(max_rowid, rec['ROWID'])
             if source:

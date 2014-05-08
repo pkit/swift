@@ -237,6 +237,52 @@ class TestContainerController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 404)
 
+    def test_PUT_GET_object_metadata(self):
+        req = Request.blank(
+            '/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Container-Meta-Test': 'Value'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank(
+            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '1', 'X-Size': '0',
+                     'X-Content-Type': 'text/plain', 'X-ETag': 'e',
+                     'X-Object-Meta-Key1': 'value1',
+                     'X-Object-Meta-Key2': 'value2'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+        resp = req.get_response(self.controller)
+        req = Request.blank(
+            '/sda1/p/a/c/o2', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '1', 'X-Size': '0',
+                     'X-Content-Type': 'text/plain', 'X-ETag': 'e',
+                     'X-Object-Meta-Key1': 'value3',
+                     'X-Object-Meta-Key2': 'value4'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank(
+            '/sda1/p/a/c?format=json')
+        resp = req.get_response(self.controller)
+        json_body = [{"name": "o",
+                      "hash": "e",
+                      "bytes": 0,
+                      "content_type": "text/plain",
+                      "metadata": {
+                          "X-Object-Meta-Key1": "value1",
+                          "X-Object-Meta-Key2": "value2"},
+                      "last_modified": "1970-01-01T00:00:01.000000"},
+                     {"name": "o2",
+                      "hash": "e",
+                      "bytes": 0,
+                      "content_type": "text/plain",
+                      "metadata": {
+                          "X-Object-Meta-Key2": "value4",
+                          "X-Object-Meta-Key1": "value3"},
+                      "last_modified": "1970-01-01T00:00:01.000000"}]
+        self.assertEquals(resp.status_int, 200)
+        self.assertEqual(simplejson.loads(resp.body), json_body)
+
     def test_PUT_GET_metadata(self):
         # Set metadata header
         req = Request.blank(
@@ -1053,16 +1099,19 @@ class TestContainerController(unittest.TestCase):
                       "hash": "x",
                       "bytes": 0,
                       "content_type": "text/plain",
+                      "metadata": {},
                       "last_modified": "1970-01-01T00:00:01.000000"},
                      {"name": "1",
                       "hash": "x",
                       "bytes": 0,
                       "content_type": "text/plain",
+                      "metadata": {},
                       "last_modified": "1970-01-01T00:00:01.000000"},
                      {"name": "2",
                       "hash": "x",
                       "bytes": 0,
                       "content_type": "text/plain",
+                      "metadata": {},
                       "last_modified": "1970-01-01T00:00:01.000000"}]
 
         req = Request.blank(
@@ -1203,11 +1252,13 @@ class TestContainerController(unittest.TestCase):
                       "hash": "x",
                       "bytes": 0,
                       "content_type": "text/plain",
+                      "metadata": {},
                       "last_modified": "1970-01-01T00:00:01.500000"},
                      {"name": "1",
                       "hash": "x",
                       "bytes": 0,
                       "content_type": "text/plain",
+                      "metadata": {},
                       "last_modified": "1970-01-01T00:00:01.000000"}, ]
 
         req = Request.blank(
@@ -1513,9 +1564,11 @@ class TestContainerController(unittest.TestCase):
             simplejson.loads(resp.body),
             [{"name": "US/OK", "hash": "x", "bytes": 0,
               "content_type": "text/plain",
+              "metadata": {},
               "last_modified": "1970-01-01T00:00:01.000000"},
              {"name": "US/TX", "hash": "x", "bytes": 0,
               "content_type": "text/plain",
+              "metadata": {},
               "last_modified": "1970-01-01T00:00:01.000000"}])
 
     def test_GET_insufficient_storage(self):
