@@ -184,6 +184,20 @@ class ContainerController(object):
         else:
             return None
 
+    def object_update(self, req, broker, name, timestamp):
+        """
+        Update container db with the latest object info
+
+        :param req: swob.Request object
+        :param broker: container DB broker object
+        :param name: Swift object name
+        :param timestamp: Swift object create timestamp
+
+        """
+        broker.put_object(name, timestamp, int(req.headers['x-size']),
+                          req.headers['x-content-type'],
+                          req.headers['x-etag'])
+
     @public
     @timing_stats()
     def DELETE(self, req):
@@ -268,9 +282,7 @@ class ContainerController(object):
                     pass
             if not os.path.exists(broker.db_file):
                 return HTTPNotFound()
-            broker.put_object(obj, timestamp, int(req.headers['x-size']),
-                              req.headers['x-content-type'],
-                              req.headers['x-etag'])
+            self.object_update(req, broker, obj, timestamp)
             return HTTPCreated(request=req)
         else:   # put container
             created = self._update_or_create(req, broker, timestamp)
