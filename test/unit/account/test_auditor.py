@@ -57,7 +57,6 @@ class TestAuditor(unittest.TestCase):
     def tearDown(self):
         rmtree(os.path.dirname(self.testdir), ignore_errors=1)
 
-    @mock.patch('swift.account.auditor.AccountBroker', FakeAccountBroker)
     def test_run_forever(self):
         sleep_times = random.randint(5, 10)
         call_times = sleep_times - 1
@@ -79,6 +78,7 @@ class TestAuditor(unittest.TestCase):
 
         conf = {}
         test_auditor = auditor.AccountAuditor(conf)
+        test_auditor.broker = FakeAccountBroker
 
         with mock.patch('swift.account.auditor.time', FakeTime()):
             def fake_audit_location_generator(*args, **kwargs):
@@ -91,10 +91,10 @@ class TestAuditor(unittest.TestCase):
         self.assertEqual(test_auditor.account_failures, 2 * call_times)
         self.assertEqual(test_auditor.account_passes, 3 * call_times)
 
-    @mock.patch('swift.account.auditor.AccountBroker', FakeAccountBroker)
     def test_run_once(self):
         conf = {}
         test_auditor = auditor.AccountAuditor(conf)
+        test_auditor.broker = FakeAccountBroker
 
         def fake_audit_location_generator(*args, **kwargs):
             files = os.listdir(self.testdir)
@@ -106,10 +106,10 @@ class TestAuditor(unittest.TestCase):
         self.assertEqual(test_auditor.account_failures, 2)
         self.assertEqual(test_auditor.account_passes, 3)
 
-    @mock.patch('swift.account.auditor.AccountBroker', FakeAccountBroker)
     def test_account_auditor(self):
         conf = {}
         test_auditor = auditor.AccountAuditor(conf)
+        test_auditor.broker = FakeAccountBroker
         files = os.listdir(self.testdir)
         for f in files:
             path = os.path.join(self.testdir, f)

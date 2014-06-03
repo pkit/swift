@@ -2693,3 +2693,29 @@ def quote(value, safe='/'):
     Patched version of urllib.quote that encodes utf-8 strings before quoting
     """
     return _quote(get_valid_utf8_str(value), safe)
+
+
+def load_provider(name, klass, err_msg):
+    try:
+        mod = __import__(name, fromlist=[klass])
+        provider = getattr(mod, klass)
+        return provider
+    except Exception:
+        raise ValueError(err_msg)
+
+
+def load_datadir(name):
+    return load_provider(name, 'DATADIR',
+                         'could not load %s.DATADIR' % name)
+
+
+def load_account_backend(name):
+    klass = load_provider(name, 'AccountBroker',
+                          'could not load %s.AccountBroker' % name)
+    return klass, load_datadir(name)
+
+
+def load_container_backend(name):
+    klass = load_provider(name, 'ContainerBroker',
+                          'could not load %s.ContainerBroker' % name)
+    return klass, load_datadir(name)

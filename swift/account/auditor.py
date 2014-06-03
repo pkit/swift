@@ -19,10 +19,10 @@ from swift import gettext_ as _
 from random import random
 
 import swift.common.db
-from swift.account.backend import AccountBroker, DATADIR
 from swift.common.utils import get_logger, audit_location_generator, \
     config_true_value, dump_recon_cache, ratelimit_sleep
 from swift.common.daemon import Daemon
+from swift.common.utils import load_account_backend
 
 from eventlet import Timeout
 
@@ -46,9 +46,11 @@ class AccountAuditor(Daemon):
         self.recon_cache_path = conf.get('recon_cache_path',
                                          '/var/cache/swift')
         self.rcache = os.path.join(self.recon_cache_path, "account.recon")
+        backend = conf.get('backend', 'swift.account.backend')
+        self.broker, self.datadir = load_account_backend(backend)
 
     def _one_audit_pass(self, reported):
-        all_locs = audit_location_generator(self.devices, DATADIR, '.db',
+        all_locs = audit_location_generator(self.devices, self.datadir, '.db',
                                             mount_check=self.mount_check,
                                             logger=self.logger)
         for path, device, partition in all_locs:
@@ -111,7 +113,7 @@ class AccountAuditor(Daemon):
         """
         start_time = time.time()
         try:
-            broker = AccountBroker(path)
+            broker = self.broker(path)
             if not broker.is_deleted():
                 broker.get_info()
                 self.logger.increment('passes')
